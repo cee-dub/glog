@@ -14,6 +14,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified portions copyright 2013 Cameron Walters. All Rights reserved.
+
 // Package glog implements logging analogous to the Google-internal C++ INFO/ERROR/V setup.
 // It provides functions Info, Warning, Error, Fatal, plus formatting variants such as
 // Infof. It also provides V-style logging controlled by the -v and -vmodule=file=2 flags.
@@ -31,6 +33,14 @@
 //	}
 //
 //	glog.V(2).Infoln("Processed", nItems, "elements")
+//
+// See the documentation for Tag for an explanation of these examples:
+//
+//	tag := NewTag("trace_id")
+//	tag.Info("Dispatching request")
+//	if tag.V(2) {
+//		tag.Infof("Request matched route %s", route)
+//	}
 //
 // Log output is buffered and written periodically using Flush. Programs
 // should call Flush before exiting to guarantee all log output is written.
@@ -68,6 +78,8 @@
 //		"glob" pattern and N is a V level. For instance,
 //			-vmodule=gopher*=3
 //		sets the V level to 3 in all Go files whose names begin "gopher".
+//
+// Tags that log to an io.Writer, not files, can be created with NewTagWriter.
 //
 package glog
 
@@ -434,6 +446,9 @@ type loggingT struct {
 	// mu protects the remaining elements of this structure and is
 	// used to synchronize logging.
 	mu sync.Mutex
+	// writer holds a writer that will be written to instead of any file if set.
+	// It will never be set on global logging, only on a loggingT in a Tag struct.
+	writer io.Writer
 	// file holds writer for each of the log types.
 	file [numSeverity]flushSyncWriter
 	// pcs is used in V to avoid an allocation when computing the caller's PC.
@@ -450,13 +465,13 @@ type loggingT struct {
 	// These flags are modified only under lock, although verbosity may be fetched
 	// safely using atomic.LoadInt32.
 	vmodule   moduleSpec // The state of the -vmodule flag.
-	verbosity Level      // V logging level, the value of the -v flag/
+	verbosity Level      // V logging level, the value of the -v flag.
 }
 
 // buffer holds a byte Buffer for reuse. The zero value is ready for use.
 type buffer struct {
 	bytes.Buffer
-	tmp  [64]byte // temporary byte array for creating headers.
+	tmp  [96]byte // temporary byte array for creating headers.
 	next *buffer
 }
 
@@ -518,7 +533,7 @@ header formats a log header as defined by the C++ implementation.
 It returns a buffer containing the formatted header.
 
 Log lines have this form:
-	Lmmdd hh:mm:ss.uuuuuu threadid file:line] msg...
+	Lmmdd hh:mm:ss.uuuuuu threadid file:line tag] msg...
 where the fields are defined as follows:
 	L                A single character, representing the log level (eg 'I' for INFO)
 	mm               The month (zero padded; ie May is '05')
@@ -527,10 +542,11 @@ where the fields are defined as follows:
 	threadid         The space-padded thread ID as returned by GetTID()
 	file             The file name
 	line             The line number
+	tag				 The user-supplied tag for the message (may be '')
 	msg              The user-supplied message
 */
-func (l *loggingT) header(s severity) *buffer {
-	// Lmmdd hh:mm:ss.uuuuuu threadid file:line]
+func (l *loggingT) header(s severity, tag *Tag) *buffer {
+	// Lmmdd hh:mm:ss.uuuuuu threadid file:line tag]
 	now := timeNow()
 	_, file, line, ok := runtime.Caller(3) // It's always the same number of frames to the user's call.
 	if !ok {
@@ -572,9 +588,13 @@ func (l *loggingT) header(s severity) *buffer {
 	buf.WriteString(file)
 	buf.tmp[0] = ':'
 	n := buf.someDigits(1, line)
-	buf.tmp[n+1] = ']'
-	buf.tmp[n+2] = ' '
-	buf.Write(buf.tmp[:n+3])
+	buf.tmp[n+1] = ' '
+	if m := copy(buf.tmp[n+2:], tag.string); m > 0 {
+		n += m
+	}
+	buf.tmp[n+2] = ']'
+	buf.tmp[n+3] = ' '
+	buf.Write(buf.tmp[:n+4])
 	return buf
 }
 
@@ -613,14 +633,14 @@ func (buf *buffer) someDigits(i, d int) int {
 	return copy(buf.tmp[i:], buf.tmp[j:])
 }
 
-func (l *loggingT) println(s severity, args ...interface{}) {
-	buf := l.header(s)
+func (l *loggingT) println(s severity, tag *Tag, args ...interface{}) {
+	buf := l.header(s, tag)
 	fmt.Fprintln(buf, args...)
 	l.output(s, buf)
 }
 
-func (l *loggingT) print(s severity, args ...interface{}) {
-	buf := l.header(s)
+func (l *loggingT) print(s severity, tag *Tag, args ...interface{}) {
+	buf := l.header(s, tag)
 	fmt.Fprint(buf, args...)
 	if buf.Bytes()[buf.Len()-1] != '\n' {
 		buf.WriteByte('\n')
@@ -628,8 +648,8 @@ func (l *loggingT) print(s severity, args ...interface{}) {
 	l.output(s, buf)
 }
 
-func (l *loggingT) printf(s severity, format string, args ...interface{}) {
-	buf := l.header(s)
+func (l *loggingT) printf(s severity, tag *Tag, format string, args ...interface{}) {
+	buf := l.header(s, tag)
 	fmt.Fprintf(buf, format, args...)
 	if buf.Bytes()[buf.Len()-1] != '\n' {
 		buf.WriteByte('\n')
@@ -653,24 +673,28 @@ func (l *loggingT) output(s severity, buf *buffer) {
 		if l.alsoToStderr || s >= l.stderrThreshold.get() {
 			os.Stderr.Write(data)
 		}
-		if l.file[s] == nil {
-			if err := l.createFiles(s); err != nil {
-				os.Stderr.Write(data) // Make sure the message appears somewhere.
-				l.exit(err)
+		if l.writer != nil {
+			l.writer.Write(data)
+		} else {
+			if l.file[s] == nil {
+				if err := l.createFiles(s); err != nil {
+					os.Stderr.Write(data) // Make sure the message appears somewhere.
+					l.exit(err)
+				}
 			}
-		}
-		switch s {
-		case fatalLog:
-			l.file[fatalLog].Write(data)
-			fallthrough
-		case errorLog:
-			l.file[errorLog].Write(data)
-			fallthrough
-		case warningLog:
-			l.file[warningLog].Write(data)
-			fallthrough
-		case infoLog:
-			l.file[infoLog].Write(data)
+			switch s {
+			case fatalLog:
+				l.file[fatalLog].Write(data)
+				fallthrough
+			case errorLog:
+				l.file[errorLog].Write(data)
+				fallthrough
+			case warningLog:
+				l.file[warningLog].Write(data)
+				fallthrough
+			case infoLog:
+				l.file[infoLog].Write(data)
+			}
 		}
 	}
 	if s == fatalLog {
@@ -681,9 +705,13 @@ func (l *loggingT) output(s severity, buf *buffer) {
 		// Write the stack trace for all goroutines to the files.
 		trace := stacks(true)
 		logExitFunc = func(error) {} // If we get a write error, we'll still exit below.
-		for log := fatalLog; log >= infoLog; log-- {
-			if f := l.file[log]; f != nil { // Can be nil if -logtostderr is set.
-				f.Write(trace)
+		if l.writer != nil {
+			l.writer.Write(trace)
+		} else {
+			for log := fatalLog; log >= infoLog; log-- {
+				if f := l.file[log]; f != nil { // Can be nil if -logtostderr is set.
+					f.Write(trace)
+				}
 			}
 		}
 		l.mu.Unlock()
@@ -940,7 +968,7 @@ func V(level Level) Verbose {
 // See the documentation of V for usage.
 func (v Verbose) Info(args ...interface{}) {
 	if v {
-		logging.print(infoLog, args...)
+		logging.print(infoLog, noTag, args...)
 	}
 }
 
@@ -948,7 +976,7 @@ func (v Verbose) Info(args ...interface{}) {
 // See the documentation of V for usage.
 func (v Verbose) Infoln(args ...interface{}) {
 	if v {
-		logging.println(infoLog, args...)
+		logging.println(infoLog, noTag, args...)
 	}
 }
 
@@ -956,81 +984,229 @@ func (v Verbose) Infoln(args ...interface{}) {
 // See the documentation of V for usage.
 func (v Verbose) Infof(format string, args ...interface{}) {
 	if v {
-		logging.printf(infoLog, format, args...)
+		logging.printf(infoLog, noTag, format, args...)
 	}
 }
 
 // Info logs to the INFO log.
 // Arguments are handled in the manner of fmt.Print; a newline is appended if missing.
 func Info(args ...interface{}) {
-	logging.print(infoLog, args...)
+	logging.print(infoLog, noTag, args...)
 }
 
 // Infoln logs to the INFO log.
 // Arguments are handled in the manner of fmt.Println; a newline is appended if missing.
 func Infoln(args ...interface{}) {
-	logging.println(infoLog, args...)
+	logging.println(infoLog, noTag, args...)
 }
 
 // Infof logs to the INFO log.
 // Arguments are handled in the manner of fmt.Printf; a newline is appended if missing.
 func Infof(format string, args ...interface{}) {
-	logging.printf(infoLog, format, args...)
+	logging.printf(infoLog, noTag, format, args...)
 }
 
 // Warning logs to the WARNING and INFO logs.
 // Arguments are handled in the manner of fmt.Print; a newline is appended if missing.
 func Warning(args ...interface{}) {
-	logging.print(warningLog, args...)
+	logging.print(warningLog, noTag, args...)
 }
 
 // Warningln logs to the WARNING and INFO logs.
 // Arguments are handled in the manner of fmt.Println; a newline is appended if missing.
 func Warningln(args ...interface{}) {
-	logging.println(warningLog, args...)
+	logging.println(warningLog, noTag, args...)
 }
 
 // Warningf logs to the WARNING and INFO logs.
 // Arguments are handled in the manner of fmt.Printf; a newline is appended if missing.
 func Warningf(format string, args ...interface{}) {
-	logging.printf(warningLog, format, args...)
+	logging.printf(warningLog, noTag, format, args...)
 }
 
 // Error logs to the ERROR, WARNING, and INFO logs.
 // Arguments are handled in the manner of fmt.Print; a newline is appended if missing.
 func Error(args ...interface{}) {
-	logging.print(errorLog, args...)
+	logging.print(errorLog, noTag, args...)
 }
 
 // Errorln logs to the ERROR, WARNING, and INFO logs.
 // Arguments are handled in the manner of fmt.Println; a newline is appended if missing.
 func Errorln(args ...interface{}) {
-	logging.println(errorLog, args...)
+	logging.println(errorLog, noTag, args...)
 }
 
 // Errorf logs to the ERROR, WARNING, and INFO logs.
 // Arguments are handled in the manner of fmt.Printf; a newline is appended if missing.
 func Errorf(format string, args ...interface{}) {
-	logging.printf(errorLog, format, args...)
+	logging.printf(errorLog, noTag, format, args...)
 }
 
 // Fatal logs to the FATAL, ERROR, WARNING, and INFO logs,
 // including a stack trace of all running goroutines, then calls os.Exit(255).
 // Arguments are handled in the manner of fmt.Print; a newline is appended if missing.
 func Fatal(args ...interface{}) {
-	logging.print(fatalLog, args...)
+	logging.print(fatalLog, noTag, args...)
 }
 
 // Fatalln logs to the FATAL, ERROR, WARNING, and INFO logs,
 // including a stack trace of all running goroutines, then calls os.Exit(255).
 // Arguments are handled in the manner of fmt.Println; a newline is appended if missing.
 func Fatalln(args ...interface{}) {
-	logging.println(fatalLog, args...)
+	logging.println(fatalLog, noTag, args...)
 }
 
 // Fatalf logs to the FATAL, ERROR, WARNING, and INFO logs,
 // including a stack trace of all running goroutines, then calls os.Exit(255).
 // Arguments are handled in the manner of fmt.Printf; a newline is appended if missing.
 func Fatalf(format string, args ...interface{}) {
-	logging.printf(fatalLog, format, args...)
+	logging.printf(fatalLog, noTag, format, args...)
+}
+
+// Tag is a logger that implements Info, Warning, etc. and their formatting
+// variants, always appending a context tag to the emitted header before the terminating ']'.
+// It may be combined with V to control verbosity:
+//	taglogger := glog.Tag("trace_id")
+//	if taglogger.V(2) { taglogger.Info("log this") }
+//	// Output: I0102 15:04:05.678901 12345 glog.go:1048 trace_id] log this
+type Tag struct {
+	string
+	*loggingT
+}
+
+// header needs a blank tag by default.
+var noTag = NewTag("")
+
+func NewTag(t string) *Tag {
+	return &Tag{string: t, loggingT: &logging}
+}
+
+// NewTagWriter returns a Tag writing only to w. All other logging config is
+// cloned from the global logging.
+func NewTagWriter(t string, w io.Writer) *Tag {
+	logging.mu.Lock()
+	logger := &loggingT{
+		writer:          w,
+		alsoToStderr:    logging.alsoToStderr,
+		stderrThreshold: logging.stderrThreshold.get(),
+		filterLength:    logging.filterLength,
+		traceLocation:   logging.traceLocation,
+		vmap:            logging.vmap,
+		vmodule:         logging.vmodule,
+		verbosity:       logging.verbosity.get(),
+	}
+	logging.mu.Unlock()
+	return &Tag{string: t, loggingT: logger}
+}
+
+func (t *Tag) String() string {
+	return t.string
+}
+
+type tagVerbose struct {
+	t *Tag
+	V Verbose
+}
+
+// V reports whether verbosity at the call site is at least the requested level.
+// See the documentation of package func V for usage. When used as a conditional,
+// access the Verbose bool with V(level).V.
+func (t *Tag) V(level Level) tagVerbose {
+	return tagVerbose{t, V(level)}
+}
+
+// Info is equivalent to the global Info function, guarded by the value of v.
+// See the documentation of V for usage.
+func (v tagVerbose) Info(args ...interface{}) {
+	if v.V {
+		v.t.print(infoLog, v.t, args...)
+	}
+}
+
+// Infoln is equivalent to the global Infoln function, guarded by the value of v.
+// See the documentation of V for usage.
+func (v tagVerbose) Infoln(args ...interface{}) {
+	if v.V {
+		v.t.println(infoLog, v.t, args...)
+	}
+}
+
+// Infof is equivalent to the global Infof function, guarded by the value of v.
+// See the documentation of V for usage.
+func (v tagVerbose) Infof(format string, args ...interface{}) {
+	if v.V {
+		v.t.printf(infoLog, v.t, format, args...)
+	}
+}
+
+// Info is equivalent to the global Info function, with the addition of the
+// context value of t. See the documentation of V for usage.
+func (t *Tag) Info(args ...interface{}) {
+	t.print(infoLog, t, args...)
+}
+
+// Infoln is equivalent to the global Infoln function, with the addition of the
+// context value of t. See the documentation of V for usage.
+func (t *Tag) Infoln(args ...interface{}) {
+	t.println(infoLog, t, args...)
+}
+
+// Infof is equivalent to the global Infof function, with the addition of the
+// context value of t. See the documentation of V for usage.
+func (t *Tag) Infof(format string, args ...interface{}) {
+	t.printf(infoLog, t, format, args...)
+}
+
+// Warning is equivalent to the global Warning function, with the addition of the
+// context value of t. See the corresponding package-level func for documentation.
+func (t *Tag) Warning(args ...interface{}) {
+	t.print(warningLog, t, args...)
+}
+
+// Warningln is equivalent to the global Warningln function, with the addition of the
+// context value of t. See the corresponding package-level func for documentation.
+func (t *Tag) Warningln(args ...interface{}) {
+	t.println(warningLog, t, args...)
+}
+
+// Warningf is equivalent to the global Warningf function, with the addition of the
+// context value of t. See the corresponding package-level func for documentation.
+func (t *Tag) Warningf(format string, args ...interface{}) {
+	t.printf(warningLog, t, format, args...)
+}
+
+// Error is equivalent to the global Error function, with the addition of the
+// context value of t. See the corresponding package-level func for documentation.
+func (t *Tag) Error(args ...interface{}) {
+	t.print(errorLog, t, args...)
+}
+
+// Errorln is equivalent to the global Errorln function, with the addition of the
+// context value of t. See the corresponding package-level func for documentation.
+func (t *Tag) Errorln(args ...interface{}) {
+	t.println(errorLog, t, args...)
+}
+
+// Errorf is equivalent to the global Errorf function, with the addition of the
+// context value of t. See the corresponding package-level func for documentation.
+func (t *Tag) Errorf(format string, args ...interface{}) {
+	t.printf(errorLog, t, format, args...)
+}
+
+// Fatal is equivalent to the global Fatal function, with the addition of the
+// context value of t. See the corresponding package-level func for documentation.
+func (t *Tag) Fatal(args ...interface{}) {
+	t.print(fatalLog, t, args...)
+}
+
+// Fatalln is equivalent to the global Fatalln function, with the addition of the
+// context value of t. See the corresponding package-level func for documentation.
+func (t *Tag) Fatalln(args ...interface{}) {
+	t.println(fatalLog, t, args...)
+}
+
+// Fatalf is equivalent to the global Fatalf function, with the addition of the
+// context value of t. See the corresponding package-level func for documentation.
+func (t *Tag) Fatalf(format string, args ...interface{}) {
+	t.printf(fatalLog, t, format, args...)
 }

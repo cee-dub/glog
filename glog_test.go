@@ -14,6 +14,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Modified portions copyright 2013 Cameron Walters. All Rights reserved.
+
 package glog
 
 import (
@@ -106,7 +108,23 @@ func TestHeader(t *testing.T) {
 	}
 	Info("test")
 	var line, pid int
-	n, err := fmt.Sscanf(contents(infoLog), "I0102 15:04:05.678901 %d glog_test.go:%d] test\n", &pid, &line)
+	n, err := fmt.Sscanf(contents(infoLog), "I0102 15:04:05.678901 %d glog_test.go:%d ] test\n", &pid, &line)
+	if n != 2 || err != nil {
+		t.Errorf("log format error: %d elements, error %s:\n%s", n, err, contents(infoLog))
+	}
+}
+
+// Test that the header includes the set context.
+func TestHeaderContext(t *testing.T) {
+	setFlags()
+	defer logging.swap(logging.newBuffers())
+	defer func(previous func() time.Time) { timeNow = previous }(timeNow)
+	timeNow = func() time.Time {
+		return time.Date(2006, 1, 2, 15, 4, 5, .678901e9, time.Local)
+	}
+	NewTag("test_tag").Info("test")
+	var line, pid int
+	n, err := fmt.Sscanf(contents(infoLog), "I0102 15:04:05.678901 %d glog_test.go:%d test_tag] test\n", &pid, &line)
 	if n != 2 || err != nil {
 		t.Errorf("log format error: %d elements, error %s:\n%s", n, err, contents(infoLog))
 	}
@@ -153,6 +171,24 @@ func TestWarning(t *testing.T) {
 	}
 }
 
+func TestTagWriter(t *testing.T) {
+	setFlags()
+	defer logging.swap(logging.newBuffers())
+	var b bytes.Buffer
+	timeNow = func() time.Time {
+		return time.Date(2006, 1, 2, 15, 4, 5, .678901e9, time.Local)
+	}
+	NewTagWriter("test_tag", &b).Info("test")
+	var line, pid int
+	n, err := fmt.Sscanf(b.String(), "I0102 15:04:05.678901 %d glog_test.go:%d test_tag] test\n", &pid, &line)
+	if n != 2 || err != nil {
+		t.Errorf("log format error: %d elements, error %s:\n%s", n, err, b.String())
+	}
+	if strings.Contains(contents(infoLog), "I") {
+		t.Fatal("info log should not contain the writer's message; log is ", contents(infoLog))
+	}
+}
+
 // Test that a V log goes to Info.
 func TestV(t *testing.T) {
 	setFlags()
@@ -165,6 +201,24 @@ func TestV(t *testing.T) {
 	}
 	if !contains(infoLog, "test", t) {
 		t.Error("Info failed")
+	}
+}
+
+// Test that a Tag V log goes to Info.
+func TestTagV(t *testing.T) {
+	setFlags()
+	defer logging.swap(logging.newBuffers())
+	logging.verbosity.Set("2")
+	defer logging.verbosity.Set("0")
+	NewTag("tag").V(2).Info("test")
+	if !contains(infoLog, "I", t) {
+		t.Errorf("Info has wrong character: %q", contents(infoLog))
+	}
+	if !contains(infoLog, "test", t) {
+		t.Error("Info failed")
+	}
+	if !contains(infoLog, "tag", t) {
+		t.Error("V failed")
 	}
 }
 
@@ -328,6 +382,13 @@ func TestLogBacktraceAt(t *testing.T) {
 
 func BenchmarkHeader(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		logging.putBuffer(logging.header(infoLog))
+		logging.putBuffer(logging.header(infoLog, noTag))
+	}
+}
+
+func BenchmarkHeaderContext(b *testing.B) {
+	t := NewTag("tenbytetag")
+	for i := 0; i < b.N; i++ {
+		logging.putBuffer(logging.header(infoLog, t))
 	}
 }
