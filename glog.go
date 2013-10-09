@@ -48,6 +48,8 @@
 //	-log_dir=""
 //		Log files will be written to this directory instead of the
 //		default temporary directory.
+//	-flush_interval=30s
+//		Log files are synced to disk at this interval.
 //
 //	Other flags provide aids to debugging.
 //
@@ -397,6 +399,7 @@ func init() {
 	flag.Var(&logging.stderrThreshold, "stderrthreshold", "logs at or above this threshold go to stderr")
 	flag.Var(&logging.vmodule, "vmodule", "comma-separated list of pattern=N settings for file-filtered logging")
 	flag.Var(&logging.traceLocation, "log_backtrace_at", "when logging hits line file:N, emit a stack trace")
+	flag.DurationVar(&flushInterval, "flush_interval", 30*time.Second, "how often the flushDaemon flushes logs to disk")
 
 	// Default stderrThreshold is ERROR.
 	logging.stderrThreshold = errorLog
@@ -831,7 +834,7 @@ func (l *loggingT) createFiles(sev severity) error {
 	return nil
 }
 
-const flushInterval = 30 * time.Second
+var flushInterval time.Duration
 
 // flushDaemon periodically flushes the log file buffers.
 func (l *loggingT) flushDaemon() {
