@@ -38,9 +38,10 @@
 //
 //	tag := NewTag("trace_id")
 //	tag.Info("Dispatching request")
-//	if tag.V(2) {
+//	if tag.V(2).V { // note the extra .V
 //		tag.Infof("Request matched route %s", route)
 //	}
+//	tag.V(2).Infoln("Processed", nItems, "elements")
 //
 // Log output is buffered and written periodically using Flush. Programs
 // should call Flush before exiting to guarantee all log output is written.
@@ -1108,7 +1109,8 @@ func (t *Tag) New(newTag string) *Tag {
 	return &Tag{string: newTag, loggingT: t.loggingT}
 }
 
-type tagVerbose struct {
+// Wrapper for Verbose logging necessary for Tag.
+type TagVerbose struct {
 	t *Tag
 	V Verbose
 }
@@ -1116,13 +1118,13 @@ type tagVerbose struct {
 // V reports whether verbosity at the call site is at least the requested level.
 // See the documentation of package func V for usage. When used as a conditional,
 // access the Verbose bool with V(level).V.
-func (t *Tag) V(level Level) tagVerbose {
-	return tagVerbose{t, V(level)}
+func (t *Tag) V(level Level) TagVerbose {
+	return TagVerbose{t, V(level)}
 }
 
 // Info is equivalent to the global Info function, guarded by the value of v.
 // See the documentation of V for usage.
-func (v tagVerbose) Info(args ...interface{}) {
+func (v TagVerbose) Info(args ...interface{}) {
 	if v.V {
 		v.t.print(infoLog, v.t, args...)
 	}
@@ -1130,7 +1132,7 @@ func (v tagVerbose) Info(args ...interface{}) {
 
 // Infoln is equivalent to the global Infoln function, guarded by the value of v.
 // See the documentation of V for usage.
-func (v tagVerbose) Infoln(args ...interface{}) {
+func (v TagVerbose) Infoln(args ...interface{}) {
 	if v.V {
 		v.t.println(infoLog, v.t, args...)
 	}
@@ -1138,7 +1140,7 @@ func (v tagVerbose) Infoln(args ...interface{}) {
 
 // Infof is equivalent to the global Infof function, guarded by the value of v.
 // See the documentation of V for usage.
-func (v tagVerbose) Infof(format string, args ...interface{}) {
+func (v TagVerbose) Infof(format string, args ...interface{}) {
 	if v.V {
 		v.t.printf(infoLog, v.t, format, args...)
 	}
