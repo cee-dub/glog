@@ -471,7 +471,7 @@ type loggingT struct {
 // buffer holds a byte Buffer for reuse. The zero value is ready for use.
 type buffer struct {
 	bytes.Buffer
-	tmp  [96]byte // temporary byte array for creating headers.
+	tmp  [192]byte // temporary byte array for creating headers.
 	next *buffer
 }
 
@@ -1101,6 +1101,11 @@ func NewTagWriter(t string, w io.Writer) *Tag {
 
 func (t *Tag) String() string {
 	return t.string
+}
+
+// New returns a *Tag with a new tag string but t's *loggingT
+func (t *Tag) New(newTag string) *Tag {
+	return &Tag{string: newTag, loggingT: t.loggingT}
 }
 
 type tagVerbose struct {
