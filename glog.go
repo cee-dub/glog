@@ -590,7 +590,7 @@ func (l *loggingT) header(s severity, tag *Tag) *buffer {
 	buf.tmp[0] = ':'
 	n := buf.someDigits(1, line)
 	buf.tmp[n+1] = ' '
-	if m := copy(buf.tmp[n+2:], tag.string); m > 0 {
+	if m := copy(buf.tmp[n+2:], tag.name); m > 0 {
 		n += m
 	}
 	buf.tmp[n+2] = ']'
@@ -1068,10 +1068,10 @@ func Fatalf(format string, args ...interface{}) {
 // variants, always appending a context tag to the emitted header before the terminating ']'.
 // It may be combined with V to control verbosity:
 //	taglogger := glog.Tag("trace_id")
-//	if taglogger.V(2) { taglogger.Info("log this") }
+//	if taglogger.V(2).V { taglogger.Info("log this") }
 //	// Output: I0102 15:04:05.678901 12345 glog.go:1048 trace_id] log this
 type Tag struct {
-	string
+	name string
 	*loggingT
 }
 
@@ -1079,7 +1079,7 @@ type Tag struct {
 var noTag = NewTag("")
 
 func NewTag(t string) *Tag {
-	return &Tag{string: t, loggingT: &logging}
+	return &Tag{name: t, loggingT: &logging}
 }
 
 // NewTagWriter returns a Tag writing only to w. All other logging config is
@@ -1097,16 +1097,16 @@ func NewTagWriter(t string, w io.Writer) *Tag {
 		verbosity:       logging.verbosity.get(),
 	}
 	logging.mu.Unlock()
-	return &Tag{string: t, loggingT: logger}
+	return &Tag{name: t, loggingT: logger}
 }
 
 func (t *Tag) String() string {
-	return t.string
+	return t.name
 }
 
 // New returns a *Tag with a new tag string but t's *loggingT
 func (t *Tag) New(newTag string) *Tag {
-	return &Tag{string: newTag, loggingT: t.loggingT}
+	return &Tag{name: newTag, loggingT: t.loggingT}
 }
 
 // Wrapper for Verbose logging necessary for Tag.
