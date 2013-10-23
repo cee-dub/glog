@@ -1100,6 +1100,10 @@ func NewTagWriter(t string, w io.Writer) *Tag {
 	return &Tag{name: t, loggingT: logger}
 }
 
+func (t *Tag) SetStderrThreshold(threshold string) error {
+	return t.stderrThreshold.Set(threshold)
+}
+
 func (t *Tag) String() string {
 	return t.name
 }
