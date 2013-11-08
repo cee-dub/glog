@@ -104,7 +104,7 @@ import (
 // severity identifies the sort of log: info, warning etc. It also implements
 // the flag.Value interface. The -stderrthreshold flag is of type severity and
 // should be modified only through the flag.Value interface. The values match
-// the corresponding constants in C++.
+// the corresponding constants in Google's original C++ implementation.
 type severity int32 // sync/atomic int32
 
 const (
@@ -530,7 +530,7 @@ func (l *loggingT) putBuffer(b *buffer) {
 var timeNow = time.Now // Stubbed out for testing.
 
 /*
-header formats a log header as defined by the C++ implementation.
+header formats a log header based on the C++ implementation with the addition of the tag field.
 It returns a buffer containing the formatted header.
 
 Log lines have this form:
@@ -895,8 +895,7 @@ func (l *loggingT) flushAll() {
 // setV computes and remembers the V level for a given PC
 // when vmodule is enabled.
 // File pattern matching takes the basename of the file, stripped
-// of its .go suffix, and uses filepath.Match, which is a little more
-// general than the *? matching used in C++.
+// of its .go suffix, and uses filepath.Match.
 // l.mu is held.
 func (l *loggingT) setV(pc uintptr) Level {
 	fn := runtime.FuncForPC(pc)
