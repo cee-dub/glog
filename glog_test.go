@@ -153,6 +153,39 @@ func TestWarning(t *testing.T) {
 	}
 }
 
+// Test that all levels go to the writer of a new Log instance.
+func TestLogWriter(t *testing.T) {
+	setFlags()
+	defer logging.swap(logging.newBuffers()) // just in case
+	var b bytes.Buffer
+	timeNow = func() time.Time {
+		return time.Date(2006, 1, 2, 15, 4, 5, .678901e9, time.Local)
+	}
+	l := WriterTo(&b)
+	l.Error("test")
+	l.Warning("test")
+	l.Info("test")
+	var line1, line2, line3, pid1, pid2, pid3 int
+	n, err := fmt.Sscanf(b.String(), ""+
+		"E0102 15:04:05.678901 %d glog_test.go:%d] test\n"+
+		"W0102 15:04:05.678901 %d glog_test.go:%d] test\n"+
+		"I0102 15:04:05.678901 %d glog_test.go:%d] test\n",
+		&pid1, &pid2, &pid3,
+		&line1, &line2, &line3)
+	if n != 6 || err != nil {
+		t.Errorf("log format error: %d elements, error %s:\n%s", n, err, b.String())
+	}
+	if contains(errorLog, "E", t) {
+		t.Errorf("error log should not contain message; log is %q", contents(errorLog))
+	}
+	if contains(warningLog, "W", t) {
+		t.Errorf("warning log should not contain message; log is %q", contents(warningLog))
+	}
+	if contains(infoLog, "I", t) {
+		t.Errorf("info log should not contain message; log is %q", contents(infoLog))
+	}
+}
+
 // Test that a V log goes to Info.
 func TestV(t *testing.T) {
 	setFlags()

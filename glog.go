@@ -414,6 +414,39 @@ func Flush() {
 	logging.lockAndFlushAll()
 }
 
+// Log is satisfied by glog loggers.
+type Log interface {
+	Info(args ...interface{})
+	Infoln(args ...interface{})
+	Infof(format string, args ...interface{})
+	Warning(args ...interface{})
+	Warningln(args ...interface{})
+	Warningf(format string, args ...interface{})
+	Error(args ...interface{})
+	Errorln(args ...interface{})
+	Errorf(format string, args ...interface{})
+	Fatal(args ...interface{})
+	Fatalln(args ...interface{})
+	Fatalf(format string, args ...interface{})
+}
+
+// WriterTo returns a logger with the global settings, writing only to w.
+func WriterTo(w io.Writer) Log {
+	logging.mu.Lock()
+	logger := loggingT{
+		writer:          w,
+		alsoToStderr:    logging.alsoToStderr,
+		stderrThreshold: logging.stderrThreshold.get(),
+		filterLength:    logging.filterLength,
+		traceLocation:   logging.traceLocation,
+		vmap:            logging.vmap,
+		vmodule:         logging.vmodule,
+		verbosity:       logging.verbosity.get(),
+	}
+	logging.mu.Unlock()
+	return &logger
+}
+
 // loggingT collects all the global state of the logging setup.
 type loggingT struct {
 	// Boolean flags. Not handled atomically because the flag.Value interface
@@ -437,6 +470,9 @@ type loggingT struct {
 	mu sync.Mutex
 	// file holds writer for each of the log types.
 	file [numSeverity]flushSyncWriter
+	// writer will be written to instead of any file if set. It will never be
+	// set on the global logger, only on a *loggingT returned by New.
+	writer io.Writer
 	// pcs is used in V to avoid an allocation when computing the caller's PC.
 	pcs [1]uintptr
 	// vmap is a cache of the V Level for each V() call site, identified by PC.
@@ -451,7 +487,7 @@ type loggingT struct {
 	// These flags are modified only under lock, although verbosity may be fetched
 	// safely using atomic.LoadInt32.
 	vmodule   moduleSpec // The state of the -vmodule flag.
-	verbosity Level      // V logging level, the value of the -v flag/
+	verbosity Level      // V logging level, the value of the -v flag.
 }
 
 // buffer holds a byte Buffer for reuse. The zero value is ready for use.
@@ -654,24 +690,30 @@ func (l *loggingT) output(s severity, buf *buffer) {
 		if l.alsoToStderr || s >= l.stderrThreshold.get() {
 			os.Stderr.Write(data)
 		}
-		if l.file[s] == nil {
-			if err := l.createFiles(s); err != nil {
-				os.Stderr.Write(data) // Make sure the message appears somewhere.
+		if l.writer != nil {
+			if _, err := l.writer.Write(data); err != nil {
 				l.exit(err)
 			}
-		}
-		switch s {
-		case fatalLog:
-			l.file[fatalLog].Write(data)
-			fallthrough
-		case errorLog:
-			l.file[errorLog].Write(data)
-			fallthrough
-		case warningLog:
-			l.file[warningLog].Write(data)
-			fallthrough
-		case infoLog:
-			l.file[infoLog].Write(data)
+		} else {
+			if l.file[s] == nil {
+				if err := l.createFiles(s); err != nil {
+					os.Stderr.Write(data) // Make sure the message appears somewhere.
+					l.exit(err)
+				}
+			}
+			switch s {
+			case fatalLog:
+				l.file[fatalLog].Write(data)
+				fallthrough
+			case errorLog:
+				l.file[errorLog].Write(data)
+				fallthrough
+			case warningLog:
+				l.file[warningLog].Write(data)
+				fallthrough
+			case infoLog:
+				l.file[infoLog].Write(data)
+			}
 		}
 	}
 	if s == fatalLog {
@@ -682,9 +724,13 @@ func (l *loggingT) output(s severity, buf *buffer) {
 		// Write the stack trace for all goroutines to the files.
 		trace := stacks(true)
 		logExitFunc = func(error) {} // If we get a write error, we'll still exit below.
-		for log := fatalLog; log >= infoLog; log-- {
-			if f := l.file[log]; f != nil { // Can be nil if -logtostderr is set.
-				f.Write(trace)
+		if l.writer != nil {
+			l.writer.Write(trace)
+		} else {
+			for log := fatalLog; log >= infoLog; log-- {
+				if f := l.file[log]; f != nil { // Can be nil if -logtostderr is set.
+					f.Write(trace)
+				}
 			}
 		}
 		l.mu.Unlock()
@@ -1034,4 +1080,79 @@ func Fatalln(args ...interface{}) {
 // Arguments are handled in the manner of fmt.Printf; a newline is appended if missing.
 func Fatalf(format string, args ...interface{}) {
 	logging.printf(fatalLog, format, args...)
+}
+
+// Info logs to the INFO log.
+// Arguments are handled in the manner of fmt.Print; a newline is appended if missing.
+func (l *loggingT) Info(args ...interface{}) {
+	l.print(infoLog, args...)
+}
+
+// Infoln logs to the INFO log.
+// Arguments are handled in the manner of fmt.Println; a newline is appended if missing.
+func (l *loggingT) Infoln(args ...interface{}) {
+	l.println(infoLog, args...)
+}
+
+// Infof logs to the INFO log.
+// Arguments are handled in the manner of fmt.Printf; a newline is appended if missing.
+func (l *loggingT) Infof(format string, args ...interface{}) {
+	l.printf(infoLog, format, args...)
+}
+
+// Warning logs to the WARNING and INFO logs.
+// Arguments are handled in the manner of fmt.Print; a newline is appended if missing.
+func (l *loggingT) Warning(args ...interface{}) {
+	l.print(warningLog, args...)
+}
+
+// Warningln logs to the WARNING and INFO logs.
+// Arguments are handled in the manner of fmt.Println; a newline is appended if missing.
+func (l *loggingT) Warningln(args ...interface{}) {
+	l.println(warningLog, args...)
+}
+
+// Warningf logs to the WARNING and INFO logs.
+// Arguments are handled in the manner of fmt.Printf; a newline is appended if missing.
+func (l *loggingT) Warningf(format string, args ...interface{}) {
+	l.printf(warningLog, format, args...)
+}
+
+// Error logs to the ERROR, WARNING, and INFO logs.
+// Arguments are handled in the manner of fmt.Print; a newline is appended if missing.
+func (l *loggingT) Error(args ...interface{}) {
+	l.print(errorLog, args...)
+}
+
+// Errorln logs to the ERROR, WARNING, and INFO logs.
+// Arguments are handled in the manner of fmt.Println; a newline is appended if missing.
+func (l *loggingT) Errorln(args ...interface{}) {
+	l.println(errorLog, args...)
+}
+
+// Errorf logs to the ERROR, WARNING, and INFO logs.
+// Arguments are handled in the manner of fmt.Printf; a newline is appended if missing.
+func (l *loggingT) Errorf(format string, args ...interface{}) {
+	l.printf(errorLog, format, args...)
+}
+
+// Fatal logs to the FATAL, ERROR, WARNING, and INFO logs,
+// including a stack trace of all running goroutines, then calls os.Exit(255).
+// Arguments are handled in the manner of fmt.Print; a newline is appended if missing.
+func (l *loggingT) Fatal(args ...interface{}) {
+	l.print(fatalLog, args...)
+}
+
+// Fatalln logs to the FATAL, ERROR, WARNING, and INFO logs,
+// including a stack trace of all running goroutines, then calls os.Exit(255).
+// Arguments are handled in the manner of fmt.Println; a newline is appended if missing.
+func (l *loggingT) Fatalln(args ...interface{}) {
+	l.println(fatalLog, args...)
+}
+
+// Fatalf logs to the FATAL, ERROR, WARNING, and INFO logs,
+// including a stack trace of all running goroutines, then calls os.Exit(255).
+// Arguments are handled in the manner of fmt.Printf; a newline is appended if missing.
+func (l *loggingT) Fatalf(format string, args ...interface{}) {
+	l.printf(fatalLog, format, args...)
 }
